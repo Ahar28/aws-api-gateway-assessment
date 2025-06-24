@@ -4,7 +4,7 @@ set -euo pipefail
 
 # --- VARIABLES ---
 # GitHub repository URL and AWS configuration
-GIT_REPO_URL="https://github.com/Ahar28/Aharnish-scan-source-assessment"
+GIT_REPO_URL="https://github.com/Ahar28/aws-api-gateway-assessment"
 REGION="${AWS_REGION:-$(aws configure get region)}"
 STACK_NAME="scanSource-stack"
 REPO_DIR="aws-api-gateway-assessment"
