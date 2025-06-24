@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Deploying AWS cognito, Lambda functions, API gateway endpoints.
+
+# --- PARAMETERS ---
+Parameters:
+  DeployLambdas:
+    Type: String
+    Description: Set to 'true' to deploy Lambda functions, 'false' to skip them.
+    AllowedValues: [true, false]
+    Default: 'false'
+
+  UrlShortenerLambdaS3Key:
+    Type: String
+    Description: The S3 key (filename) for the URL shortener lambda code.
+  ConversionRateLambdaS3Key:
+    Type: String
+    Description: The S3 key (filename) for the currency conversion lambda code.
+
+# --- CONDITIONS ---
+Conditions:
+  ShouldDeployLambdas: !Equals [!Ref DeployLambdas, 'true']
+
+# --- RESOURCES ---
+Resources:
+  # S3 Bucket for Lambda source code
+  LambdaCodeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Cognito User Pool Resources
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: user-pool-scanSource
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+  
+  # Cognito User Pool Domain for hosted UI
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: user-pool-scansource
+      UserPoolId: !Ref CognitoUserPool
+
+  # Cognito User Pool Client for application integration
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: user-pool-scanSource-client
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - !Sub 'https://s3.${AWS::Region}.amazonaws.com/${FrontEndBucket}/index.html'
+      LogoutURLs:
+        - !Sub 'https://s3.${AWS::Region}.amazonaws.com/${FrontEndBucket}/index.html'
+
+  # IAM Role for Lambda execution
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lambda-execution-role-scanSource
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [lambda.amazonaws.com]
+            Action: [sts:AssumeRole]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Lambda function for URL shortener
+  UrlShortenerFunction:
+    Type: AWS::Lambda::Function
+    Condition: ShouldDeployLambdas
+    Properties:
+      FunctionName: UrlShortenerFunction
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref UrlShortenerLambdaS3Key
+
+  # Lambda function for currency conversion
+  ConversionRateFunction:
+    Type: AWS::Lambda::Function
+    Condition: ShouldDeployLambdas
+    Properties:
+      FunctionName: ConversionRateFunction
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref ConversionRateLambdaS3Key
+
+  # S3 Bucket for hosting the frontend
+  FrontEndBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'scansource-frontend-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+
+  # S3 Bucket Policy for public access to frontend files
+  FrontEndBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontEndBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${FrontEndBucket}/*'
+
+  # API Gateway for backend integration
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ScanSourceApi
+      EndpointConfiguration:
+        Types: [ REGIONAL ]
+  
+  # Cognito Authorizer for API Gateway
+  ApiGatewayCognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      Type: COGNITO_USER_POOLS
+      RestApiId: !Ref ApiGatewayRestApi
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs: [ !GetAtt CognitoUserPool.Arn ]
+
+  # API Gateway resources and methods for URL shortener
+  UrlShortResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: urlshort
+
+  # Options method 
+  UrlShortOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref UrlShortResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates: { application/json: '{"statusCode":200}' }
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Post method
+  UrlShortPostMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: ShouldDeployLambdas
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref UrlShortResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayCognitoAuthorizer
+      RequestParameters: { method.request.header.Authorization: true }
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UrlShortenerFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates: { application/json: "$input.json('$')" }
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: { application/json: Empty }
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  # API Gateway resources and methods for currency conversion
+  ConversionResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: conversion
+
+  # Options method
+  ConversionOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref ConversionResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates: { application/json: '{"statusCode":200}' }
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # Post method
+  ConversionPostMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: ShouldDeployLambdas 
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref ConversionResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayCognitoAuthorizer
+      RequestParameters: { method.request.header.Authorization: true }
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub >-
+          arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConversionRateFunction.Arn}/invocations
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates: { application/json: "$input.json('$')" }
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,POST'"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels: { application/json: Empty }
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  # Permissions for API Gateway to invoke Lambda functions
+  LambdaPermissionForUrlShort:
+    Type: AWS::Lambda::Permission
+    Condition: ShouldDeployLambdas
+    Properties:
+      FunctionName: !Ref UrlShortenerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/POST/urlshort"
+
+  LambdaPermissionForConversion:
+    Type: AWS::Lambda::Permission
+    Condition: ShouldDeployLambdas
+    Properties:
+      FunctionName: !Ref ConversionRateFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/POST/conversion"
+
+  # Deployment stage for API Gateway
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Condition: ShouldDeployLambdas
+    DependsOn:
+      - UrlShortPostMethod
+      - UrlShortOptionsMethod
+      - ConversionPostMethod
+      - ConversionOptionsMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: prod
+
+# --- OUTPUTS ---
+Outputs:
+  ApiInvokeURL:
+    Description: "Invoke URL for the combined API (prod stage)"
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  UrlShortEndpoint:
+    Description: "URL Shortener endpoint"
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/urlshort"
+  ConversionEndpoint:
+    Description: "Currency Conversion endpoint"
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/conversion"
+  UserPoolDomainPrefix:
+    Description: "Cognito Domain prefix"
+    Value: !Ref CognitoUserPoolDomain
+  UserPoolAppClientId:
+    Description: "Cognito App Client ID"
+    Value: !Ref CognitoUserPoolClient
+  UserPoolAppClientSecret:
+    Description: "Cognito App Client Secret"
+    Value: !GetAtt CognitoUserPoolClient.ClientSecret
+  AWSRegion:
+    Description: "AWS Region"
+    Value: !Ref AWS::Region
+  FrontEndURL:
+    Description: "URL for the front-end website"
+    Value: !GetAtt FrontEndBucket.WebsiteURL
+  CognitoCallbackURL:
+    Description: "The exact callback URL registered with Cognito"
+    Value: !Sub 'https://s3.${AWS::Region}.amazonaws.com/${FrontEndBucket}/index.html'

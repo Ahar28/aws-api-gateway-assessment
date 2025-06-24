@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Aharnish-scansource-assessment</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        .btn-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button,
+        input {
+            padding: 10px;
+            font-size: 1em;
+        }
+
+        pre {
+            background: #333;
+            color: #fff;
+            padding: 10px;
+            overflow-x: auto;
+        }
+
+        .output {
+            margin-top: 20px;
+        }
+
+        .readable {
+            background: #e0f7fa;
+            padding: 10px;
+        }
+    </style>
+
+    <!-- Loading the generated configuration -->
+    <script src="config.js"></script>
+    <script>
+      // Extracting configuration fields from the loaded config.js
+      const {
+        apiInvokeUrl,
+        urlShortEndpoint,
+        conversionEndpoint,
+        cognitoDomain,
+        clientId,
+        clientSecret,
+        cognitoCallbackUrl,
+      } = window._config;
+
+      // constants for authentication and API endpoints
+      const REDIRECT_URI        = cognitoCallbackUrl;
+      const REDIRECT_LOGOUT_URI = REDIRECT_URI;
+      const TOKEN_URL           = `${cognitoDomain}/oauth2/token`;
+      const LOGIN_URL           = `${cognitoDomain}/login?client_id=${clientId}` +
+                                  `&response_type=code&scope=openid+email&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+      const LOGOUT_URL          = `${cognitoDomain}/logout?client_id=${clientId}` +
+                                  `&logout_uri=${encodeURIComponent(REDIRECT_LOGOUT_URI)}`;                        
+      const credentials         = `${clientId}:${clientSecret}`;
+      //creating secret hash
+      const encoded             = btoa(credentials);
+
+      window.onload = () => {
+          checkLogin();
+          document.getElementById("shortenURLBtn").onclick = fetchURL;
+          document.getElementById("currencyBtn").onclick = fetchCurrencyRates;
+          document.getElementById("logoutBtn").onclick = logoutBtnFun;
+      };
+
+      // Function to shorten a URL using the backend API
+      async function fetchURL() {
+          try {
+              const id = localStorage.getItem("id_token");
+              const userurl = document.getElementById("urlInput").value || "www.google.com";
+              const res = await fetch(urlShortEndpoint, {
+                  method: "POST",
+                  headers: { Authorization: id },
+                  body: JSON.stringify({ url: userurl }),
+              });
+              const { body: bodyString } = await res.json();
+              const body = JSON.parse(bodyString);
+              displayData(body, formatShortUrl(body.shortUrl));
+          } catch (err) {
+              displayError(err);
+          }
+      }
+
+      // Function to fetch currency conversion rates using the backend API
+      async function fetchCurrencyRates() {
+          try {
+              const id = localStorage.getItem("id_token");
+              const baseCurrency = document.getElementById("currencyInput").value || "CAD";
+              const res = await fetch(conversionEndpoint, {
+                  method: "POST",
+                  headers: { Authorization: id },
+                  body: JSON.stringify({ currency: baseCurrency }),
+              });
+              const { body: bodyString } = await res.json();
+              const body = JSON.parse(bodyString);
+              displayData(body, formatCurrencyRates(body));
+          } catch (err) {
+              displayError(err);
+          }
+      }
+
+      // To Display data in both JSON and user-friendly formats
+      function displayData(json, readable) {
+          document.getElementById("jsonOutput").textContent = JSON.stringify(json, null, 2);
+          document.getElementById("userOutput").innerHTML = readable;
+      }
+
+      // Displaying error messages
+      function displayError(err) {
+          displayData({ error: err.message }, `<strong>Error:</strong> ${err.message}`);
+      }
+
+      // Formatting the shortened URL for display
+      function formatShortUrl(url) {
+          if (!url) return "No short URL available.";
+          return `<p>Short URL: <a href="${url}" target="_blank">${url}</a></p>`;
+      }
+
+      // Formatting currency rates for display
+      function formatCurrencyRates(data) {
+          if (!data || !data.rates) return "No currency data available.";
+          let html = `<p><strong>Provider:</strong> ${data.provider}</p>` +
+                     `<p><strong>Base Currency:</strong> ${data.base_code}</p>` +
+                     `<p><strong>Last Update:</strong> ${data.time_last_update_utc}</p>` +
+                     `<p><strong>Next Update:</strong> ${data.time_next_update_utc}</p>` +
+                     `<table border="1" cellspacing="0" cellpadding="5">
+                        <thead><tr><th>Currency</th><th>Rate</th></tr></thead><tbody>`;
+          for (let code in data.rates) {
+              html += `<tr><td>${code}</td><td>${data.rates[code]}</td></tr>`;
+          }
+          html += `</tbody></table>`;
+          return html;
+      }
+
+      // Log out the user and clear tokens
+      async function logoutBtnFun() {
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("id_token");
+          window.location.href = LOGOUT_URL;
+      }
+
+      // Exchange authorization code for tokens
+      async function exchangeCodeForToken(code) {
+          const params = new URLSearchParams({
+              grant_type:   "authorization_code",
+              client_id:    clientId,
+              code,
+              redirect_uri: REDIRECT_URI,
+              client_secret: clientSecret,
+          });
+          const res = await fetch(TOKEN_URL, {
+              method: "POST",
+              body: params,
+              headers: {
+                    Authorization: `Basic ${encoded}`,
+                },
+          });
+          const data = await res.json();
+          if (data.id_token) {
+              localStorage.setItem("access_token", data.access_token);
+              localStorage.setItem("id_token", data.id_token);
+              window.history.replaceState({}, document.title, REDIRECT_URI);
+          } else {
+              console.error("Token exchange failed", data);
+          }
+      }
+
+      // Get query parameter from the URL
+      function getQueryParam(name) {
+          return new URLSearchParams(window.location.search).get(name);
+      }
+
+      // Check if the token is expired
+      function isTokenExpired(token) {
+          if (!token) return true;
+          const payload = JSON.parse(atob(token.split(".")[1]));
+          return payload.exp < Math.floor(Date.now() / 1000);
+      }
+
+      // Check if the user is logged in, otherwise redirect to login
+      async function checkLogin() {
+          const code = getQueryParam("code");
+          const token = localStorage.getItem("id_token");
+          if (code) {
+              await exchangeCodeForToken(code);
+          } else if (!token || isTokenExpired(token)) {
+              window.location.href = LOGIN_URL;
+          }
+      }
+    </script>
+</head>
+
+<body>
+    <h1>Aharnish-scansource-assessment</h1>
+    <h2> Two Apis </h2>
+
+    <div class="btn-group">
+        <div>
+            <input type="text" id="urlInput" placeholder="Enter url" value="www.google.com" />
+            <button id="shortenURLBtn">shorten a URL</button>
+        </div>
+        <div>
+            <input type="text" id="currencyInput" placeholder="Enter currency" value="CAD" />
+            <button id="currencyBtn">Get conversion rate</button>
+        </div>
+        <div>
+            <button id="logoutBtn">Log Out</button>
+        </div>
+    </div>
+
+    <div class="output">
+        <h3>User Friendly Output</h3>
+        <div class="readable" id="userOutput">Click a button to fetch data</div>
+
+        <h3>JSON Output</h3>
+        <pre id="jsonOutput">Click a button to fetch data</pre>
+    </div>
+</body>
+
+</html>
